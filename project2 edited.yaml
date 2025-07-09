@@ -1,0 +1,353 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Here are the steps to set up an AWS project using Auto Scaling Groups (ASG), EC2 instances, and an Elastic Load Balancer (ELB):"
+
+Resources:
+  MyVPC:  
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "192.168.10.0/24"
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: MyVPC
+
+  privateA: 
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: "192.168.10.0/26"
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: "pvt-a"
+  
+  privateB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: "192.168.10.64/26"
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: us-east-1b
+      Tags:
+        - Key: Name
+          Value: "pvt-b"
+  
+  publicA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: "192.168.10.128/26"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: "pub-a"
+  
+  publicB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: "192.168.10.192/26"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: us-east-1b
+      Tags:
+        - Key: Name
+          Value: "pub-b"
+
+  RouterPub:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  RouterPvt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  MySubnetAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref publicA
+      RouteTableId: !Ref RouterPub
+
+  MySubnetAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref publicB
+      RouteTableId: !Ref RouterPub
+  
+  MySubnetAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref privateA
+      RouteTableId: !Ref RouterPvt
+
+  MySubnetAssociation4:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref privateB
+      RouteTableId: !Ref RouterPvt
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PubRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouterPub
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  MyEIP:
+    Type: AWS::EC2::EIP
+    
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt MyEIP.AllocationId
+      SubnetId: !Ref publicA
+
+  PvtRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouterPvt
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway
+
+  SgLB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow Internet"
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+
+  SgWebapp:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow HTTP and Django"
+      VpcId: !Ref MyVPC
+
+  SgWebappIngressHTTP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SgWebapp
+      IpProtocol: "tcp"
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref SgLB
+
+  InternetLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: InternetLB
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref SgLB
+      Subnets:
+        - !Ref publicA
+        - !Ref publicB
+
+  PrivateInstanceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: TargetGroup
+      VpcId: !Ref MyVPC
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+        
+  LoadbalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternetLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PrivateInstanceTargetGroup
+
+  # IAM Role with permissions to access AWS Secrets Manager and S3
+  EC2SecretsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: MyEC2SecretsRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: SecretsManagerAndS3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Allow access to Secrets Manager
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: "*"  # Consider narrowing this down in production
+
+
+  # Instance Profile to attach the IAM Role to EC2 instances.
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: EC2SecretsInstanceProfile
+      Roles:
+        - Ref: EC2SecretsRole
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: "MyEc2Template"
+      LaunchTemplateData:
+        ImageId: "ami-0953476d60561c955"
+        InstanceType: "t2.micro"
+        KeyName: "linux-ppk-key"
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        SecurityGroupIds:
+          - !Ref SgWebapp
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            exec > /tmp/user-data.log 2>&1
+            echo "Starting user-data script..."
+
+            # Install git and clone your project
+            sudo yum install -y git
+            sudo -u ec2-user git clone -b master --single-branch https://github.com/Birendrakum/AWS-Project.git /home/ec2-user/AWS-Project
+
+            # Install Python3, pip, and jq (needed for JSON parsing)
+            sudo yum install -y python3 python3-pip jq
+
+            # Install Django and other Python packages
+            sudo -H pip3 install django boto3 django-storages[boto3]
+
+            # Install nginx
+            sudo yum install -y nginx
+
+            # Go to the AWS-Project directory
+            cd /home/ec2-user/AWS-Project
+
+            # First, retrieve a token from the metadata service with a 6-hour TTL
+            TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+            # Then, use the token to fetch the public IP
+            PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+            echo "Public IP: $PUBLIC_IP"
+
+            sudo sed -i "s/server_name .*;/server_name $PUBLIC_IP;/g" django.conf
+
+            # Copy the updated django.conf to the nginx configuration directory
+            sudo cp django.conf /etc/nginx/conf.d/
+
+            # Restart nginx to load the new configuration
+            sudo systemctl restart nginx
+
+            # Navigate to the Django project directory
+            cd Webpage_code/
+
+            # Fetch AWS secrets from Secrets Manager (replace "secret1" with your secret's ID)
+            # Get secret from Secrets Manager
+            SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id "secret1" --query "SecretString" --output text 2>/dev/null)
+            UNESCAPED_JSON=$(echo "$SECRET_JSON" | jq -r .)
+
+            # Extract keys from secret JSON
+            ACCESS_KEY=$(echo "$UNESCAPED_JSON" | jq -r '.Access_key')
+            SECRET_KEY=$(echo "$UNESCAPED_JSON" | jq -r '.Secret_key')
+            echo "Secret JSON: $SECRET_JSON" >> /tmp/user-data.log
+
+            # Inject the retrieved keys into your Django settings.py file
+            sudo sed -i "s/^AWS_ACCESS_KEY_ID\s*=.*/AWS_ACCESS_KEY_ID = '$ACCESS_KEY'/" /home/ec2-user/AWS-Project/Webpage_code/myproject/settings.py
+            sudo sed -i "s|^AWS_SECRET_ACCESS_KEY\s*=.*|AWS_SECRET_ACCESS_KEY = '$SECRET_KEY'|" /home/ec2-user/AWS-Project/Webpage_code/myproject/settings.py
+
+            # Apply Django migrations and start the Django server binding to all network interfaces
+            nohup python3 manage.py runserver 127.0.0.1:8000 > /home/ec2-user/django.log 2>&1 &
+
+            echo "Setup complete. Access your website using http://$PUBLIC_IP:8000"
+
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - !Ref publicA
+        - !Ref publicB
+      TargetGroupARNs:
+        - !Ref PrivateInstanceTargetGroup
+      MinSize: 1
+      MaxSize: 4
+      MetricsCollection:
+        - Granularity: "1Minute"
+
+  CPUAlarmHigh:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: "Scale out when CPU usage exceeds 70%"
+      MetricName: "CPUUtilization"
+      Namespace: "AWS/EC2"
+      Statistic: "Average"
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 70
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - !Ref ScaleOutPolicy
+      Dimensions:
+        - Name: "AutoScalingGroupName"
+          Value: !Ref AutoScalingGroup
+
+  CPUAlarmLow:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: "Scale In when CPU usage below 50%"
+      MetricName: "CPUUtilization"
+      Namespace: "AWS/EC2"
+      Statistic: "Average"
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: "LessThanThreshold"
+      AlarmActions:
+        - !Ref ScaleInPolicy
+      Dimensions:
+        - Name: "AutoScalingGroupName"
+          Value: !Ref AutoScalingGroup
+
+  ScaleOutPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      AdjustmentType: "ChangeInCapacity"
+      ScalingAdjustment: 2
+      Cooldown: 120
+
+  ScaleInPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      AdjustmentType: "ChangeInCapacity"
+      ScalingAdjustment: -1
+      Cooldown: 120    
+
